@@ -6,3 +6,4 @@ Handles the rendering of a fluid. Does NOT simulate, only handles meshing and re
 Changelog
 =========
 23/09/07 - Started project.
+23/09/08 - Plugin system in place.
