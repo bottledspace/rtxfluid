@@ -1,25 +1,30 @@
-#include "scene.h"
+#include "database.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
+#include <windows.h>
 
-
-#define ACCEL_ID     "flip:accel"
-#define PARTICLES_ID "flip:particles"
+struct Particle {
+    float x, y;
+    float u, v;
+};
 
 int on_init(void)
 {
-    if (S_init()) {
+    if (D_connect()) {
         return EXIT_FAILURE;
     }
-    struct Node *accel = S_find_or_create(ACCEL_ID);
-    struct Node *particles = S_find_or_create(PARTICLES_ID);
-    (void)accel;
-    (void)particles;
+
+    struct D_TableDescriptor particlesTable;
+    strcpy(particlesTable.name, "Particles");
+    (void)D_create_table(&particlesTable);
+
     fprintf(stderr, "FLIP loaded!\n");
     return EXIT_SUCCESS;
 }
 
+
 void on_deinit(void)
 {
-    S_deinit();
+    D_disconnect();
 }

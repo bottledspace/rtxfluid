@@ -7,3 +7,4 @@ Changelog
 =========
 23/09/07 - Started project.
 23/09/08 - Plugin system in place.
+23/09/10 - Initial draft of in-memory shared database.

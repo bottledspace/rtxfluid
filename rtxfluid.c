@@ -1,4 +1,4 @@
-#include "scene.h"
+#include "database.h"
 #include "plugin.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,7 +6,7 @@
 
 int main(int argc, char **argv)
 {
-    if (S_init()) {
+    if (D_connect()) {
         return EXIT_FAILURE;
     }
 
@@ -15,6 +15,6 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    S_deinit();
+    D_disconnect();
     return EXIT_SUCCESS;
 }
