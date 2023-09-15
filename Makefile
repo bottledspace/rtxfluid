@@ -1,7 +1,7 @@
 .PHONY : clean all
 
 CC := x86_64-w64-mingw32-gcc
-CFLAGS := -g -Wall -Wpedantic -Werror
+CFLAGS := -g -Wall -Wpedantic -Werror -Wno-unused-function
 
 all : rtxfluid.exe flip.dll
 clean :
