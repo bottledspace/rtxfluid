@@ -1,12 +1,24 @@
+#include <windows.h>
 #include "database.h"
 #include "plugin.h"
+#include "renderer.h"
 #include <stdio.h>
 #include <stdlib.h>
 
 
-int main(int argc, char **argv)
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpszCmdLine, int nCmdShow)
 {
     if (D_connect()) {
+        return EXIT_FAILURE;
+    }
+
+    struct R_State *state;
+    const struct R_RendererDesc desc = {
+        .type = R_TYPE_GL1,
+        .nCmdShow = nCmdShow,
+        .hInstance = hInstance
+    };
+    if (R_create(&state, &desc)) {
         return EXIT_FAILURE;
     }
 
@@ -15,6 +27,11 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    for (;;) {
+        if (!R_update(state)) {
+            break;
+        }
+    }
     D_disconnect();
     return EXIT_SUCCESS;
 }

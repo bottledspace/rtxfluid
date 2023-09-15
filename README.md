@@ -31,3 +31,4 @@ Changelog
     23/09/07 - Started project.
     23/09/08 - Plugin system in place.
     23/09/15 - Initial draft of in-memory shared database.
+    23/09/15 - Add basic windowing system.
