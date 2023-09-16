@@ -5,6 +5,8 @@
 struct R_RendererDesc {
 	int type;
 	const char *title;
+	unsigned width;
+	unsigned height;
 #ifdef _WIN32
 	int nCmdShow;          // = SW_*
 	HINSTANCE hInstance;

@@ -16,7 +16,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpszCmdLi
     const struct R_RendererDesc desc = {
         .type = R_TYPE_VULKAN,
         .nCmdShow = nCmdShow,
-        .hInstance = hInstance
+        .hInstance = hInstance,
+        .width = 800,
+        .height = 600
     };
     if (R_create(&state, &desc)) {
         return EXIT_FAILURE;
