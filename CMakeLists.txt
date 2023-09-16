@@ -1,5 +1,7 @@
 cmake_minimum_required (VERSION 3.5.1)
-
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS")
 project (rtxfluid)
 add_library(flip SHARED flip.c database.c)
-add_executable(rtxfluid rtxfluid.c plugin.c database.c)
+add_executable(rtxfluid rtxfluid.c plugin.c database.c renderer_vk.c)
+include_directories(rtxfluid C:\\VulkanSDK\\1.3.261.1\\Include)
+target_link_libraries(rtxfluid C:\\VulkanSDK\\1.3.261.1\\Lib\\vulkan-1.lib)

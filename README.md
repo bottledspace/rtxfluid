@@ -22,8 +22,6 @@ from within this folder:
 
 Open the vcproj once generated and build the `flip` and `rtxfluid` solutions. Run the `rtxfluid` solution.
 
-Alternatively you can use WSL to cross compile using mingw. To do this, simply run `make` within this folder.
-
 
 Changelog
 =========

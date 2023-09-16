@@ -14,7 +14,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpszCmdLi
 
     struct R_State *state;
     const struct R_RendererDesc desc = {
-        .type = R_TYPE_GL1,
+        .type = R_TYPE_VULKAN,
         .nCmdShow = nCmdShow,
         .hInstance = hInstance
     };
