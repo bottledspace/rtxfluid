@@ -95,13 +95,12 @@ static void R_impl_draw(struct R_State *state_)
 	vkCmdEndRenderPass(state->vkCommandBuffer);
 	vkEndCommandBuffer(state->vkCommandBuffer);
 
-	const VkSemaphore waitSemaphores[] = { state->vkImageAvailableSemaphore };
+
 	const VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT };
-	
 	VkSubmitInfo submitInfo = {0};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	submitInfo.waitSemaphoreCount = 1;
-	submitInfo.pWaitSemaphores = waitSemaphores;
+	submitInfo.pWaitSemaphores = &state->vkImageAvailableSemaphore;
 	submitInfo.pWaitDstStageMask = waitStages;
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &state->vkCommandBuffer;
@@ -165,7 +164,7 @@ static void R_impl_create_instance(struct R_StateVK *state, struct R_RendererDes
 	const char *extensionNames[] = {
 		VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
 		VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-		VK_KHR_SURFACE_EXTENSION_NAME,
+		VK_KHR_SURFACE_EXTENSION_NAME
 	};
 	const char *validationLayerNames[] = {
 		"VK_LAYER_KHRONOS_validation"
@@ -297,8 +296,7 @@ static void R_impl_create_pipeline(struct R_StateVK *state, struct R_RendererDes
 	shaderStageInfoFS.module = shaderModuleFS;
 	shaderStageInfoFS.pName = "main";
 
-	VkPipelineShaderStageCreateInfo shaderStages[] = { shaderStageInfoVS, shaderStageInfoFS };
-
+	const VkPipelineShaderStageCreateInfo shaderStages[] = { shaderStageInfoVS, shaderStageInfoFS };
 	const VkDynamicState dynamicStates[] = {
 		VK_DYNAMIC_STATE_VIEWPORT,
 		VK_DYNAMIC_STATE_SCISSOR
@@ -598,10 +596,13 @@ static LRESULT CALLBACK R_impl_WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
 	}
 	case WM_DESTROY: {
 		struct R_StateVK *state = R_STATE(hWnd);
+		vkWaitForFences(state->vkDevice, 1, &state->vkFence, VK_TRUE, UINT64_MAX);
+		vkDestroyFence(state->vkDevice, state->vkFence, NULL);
 		vkDestroySemaphore(state->vkDevice, state->vkImageAvailableSemaphore, NULL);
 		vkDestroySemaphore(state->vkDevice, state->vkRenderFinishedSemaphore, NULL);
-		vkDestroyFence(state->vkDevice, state->vkFence, NULL);
+		vkDestroyRenderPass(state->vkDevice, state->vkRenderPass, NULL);
 		vkDestroyPipelineLayout(state->vkDevice, state->vkPipelineLayout, NULL);
+		vkDestroyPipeline(state->vkDevice, state->vkPipeline, NULL);
 		for (size_t i = 0; i < R_SWAPCHAIN_COUNT; i++) {
 			vkDestroyFramebuffer(state->vkDevice, state->vkSwapchainFramebuffers[i], NULL);
 			vkDestroyImageView(state->vkDevice, state->vkSwapchainViews[i], NULL);
