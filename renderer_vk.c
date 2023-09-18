@@ -37,6 +37,7 @@ struct R_StateVK {
 	VkRenderPass vkRenderPass;
 	VkPipelineLayout vkPipelineLayout;
 	VkPipeline vkPipeline;
+	VkImage vkRaytraceImage;
 };
 
 
@@ -59,6 +60,7 @@ static void R_impl_draw(struct R_State *state_)
 	beginInfo.pInheritanceInfo = NULL;
 	vkBeginCommandBuffer(state->vkCommandBuffer, &beginInfo);
 
+#if 0
 	VkRenderPassBeginInfo renderPassInfo = {0};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 	renderPassInfo.renderPass = state->vkRenderPass;
@@ -93,8 +95,44 @@ static void R_impl_draw(struct R_State *state_)
 
 	vkCmdDraw(state->vkCommandBuffer, 3, 1, 0, 0);
 	vkCmdEndRenderPass(state->vkCommandBuffer);
-	vkEndCommandBuffer(state->vkCommandBuffer);
+#endif
+	VkImageMemoryBarrier barrier = {0};
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = state->vkSwapchainImages[imageIndex];
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	barrier.subresourceRange.layerCount = 1;
+	barrier.subresourceRange.levelCount = 1;
+	vkCmdPipelineBarrier(state->vkCommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0, 0, NULL, 0, NULL, 1, &barrier);
 
+	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	barrier.image = state->vkRaytraceImage;
+	vkCmdPipelineBarrier(state->vkCommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0, 0, NULL, 0, NULL, 1, &barrier);
+	
+	VkImageCopy regions = {0};
+	regions.extent.width = state->width;
+	regions.extent.height = state->height;
+	regions.extent.depth = 1;
+	regions.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	regions.dstSubresource.layerCount = 1;
+	regions.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	regions.srcSubresource.layerCount = 1;
+	vkCmdCopyImage(state->vkCommandBuffer, state->vkRaytraceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		state->vkSwapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &regions);
+	
+	barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+	barrier.image = state->vkSwapchainImages[imageIndex];
+	vkCmdPipelineBarrier(state->vkCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+		0, 0, NULL, 0, NULL, 1, &barrier);
+	
+	vkEndCommandBuffer(state->vkCommandBuffer);
 
 	const VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT };
 	VkSubmitInfo submitInfo = {0};
@@ -439,7 +477,7 @@ static void R_impl_create_swapchain(struct R_StateVK *state, struct R_RendererDe
 
 	uint32_t formatIndex;
 	for (formatIndex = 0; formatIndex < formatCount; formatIndex++) {
-		if (surfaceFormats[formatIndex].format == VK_FORMAT_B8G8R8A8_SRGB
+		if (surfaceFormats[formatIndex].format == VK_FORMAT_B8G8R8A8_UNORM
 		 && surfaceFormats[formatIndex].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
 			break;
 		}
@@ -468,7 +506,7 @@ static void R_impl_create_swapchain(struct R_StateVK *state, struct R_RendererDe
 	swapchainCreateInfo.imageColorSpace = surfaceFormats[formatIndex].colorSpace;
 	swapchainCreateInfo.imageExtent = surfaceCapabilities.currentExtent;
 	swapchainCreateInfo.imageArrayLayers = 1;
-	swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     swapchainCreateInfo.queueFamilyIndexCount = 0;
     swapchainCreateInfo.pQueueFamilyIndices = NULL;
@@ -556,13 +594,56 @@ static void R_impl_create_swapchain(struct R_StateVK *state, struct R_RendererDe
 }
 
 
+static void R_impl_create_raytrace_image(struct R_StateVK *state, const struct R_RendererDesc *desc)
+{
+	VkImageCreateInfo imageInfo = {0};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent.width = state->width;
+    imageInfo.extent.height = state->height;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    vkCreateImage(state->vkDevice, &imageInfo, NULL, &state->vkRaytraceImage);
+
+	VkMemoryRequirements memRequirements;
+	vkGetImageMemoryRequirements(state->vkDevice, state->vkRaytraceImage, &memRequirements);
+
+	VkMemoryAllocateInfo allocInfo = {0};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.allocationSize = memRequirements.size;
+
+	VkPhysicalDeviceMemoryProperties memProperties;
+	vkGetPhysicalDeviceMemoryProperties(state->vkPhysicalDevice, &memProperties);
+	uint32_t i;
+	for (i = 0; i < memProperties.memoryTypeCount; i++) {
+		if ((1 << i) & memRequirements.memoryTypeBits
+			&& memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+			allocInfo.memoryTypeIndex = i;
+			break;
+		}
+	}
+	assert(i < memProperties.memoryTypeCount);
+
+	VkDeviceMemory memory;
+	vkAllocateMemory(state->vkDevice, &allocInfo, NULL, &memory);
+	vkBindImageMemory(state->vkDevice, state->vkRaytraceImage, memory, 0);
+}
+
 static int R_impl_on_create(struct R_StateVK *state, const struct R_RendererDesc *desc)
 {
 	R_impl_create_instance(state, desc);
 	R_impl_create_device(state, desc);
 	R_impl_create_swapchain(state, desc);
 	R_impl_create_pipeline(state, desc);
-
+	R_impl_create_raytrace_image(state, desc);
 	return EXIT_SUCCESS;
 }
 
@@ -607,6 +688,7 @@ static LRESULT CALLBACK R_impl_WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
 			vkDestroyFramebuffer(state->vkDevice, state->vkSwapchainFramebuffers[i], NULL);
 			vkDestroyImageView(state->vkDevice, state->vkSwapchainViews[i], NULL);
 		}
+		vkDestroyImage(state->vkDevice, state->vkRaytraceImage, NULL);
 		vkDestroySwapchainKHR(state->vkDevice, state->vkSwapchain, NULL);
 		vkDestroyCommandPool(state->vkDevice, state->vkCommandPool, NULL);
 		vkDestroySurfaceKHR(state->vkInstance, state->vkSurface, NULL);
