@@ -38,6 +38,8 @@ struct R_StateVK {
 	VkPipelineLayout vkPipelineLayout;
 	VkPipeline vkPipeline;
 	VkImage vkRaytraceImage;
+
+	PFN_vkCreateRayTracingPipelinesKHR vkCreateRayTracingPipelinesKHR_;
 };
 
 
@@ -96,6 +98,7 @@ static void R_impl_draw(struct R_State *state_)
 	vkCmdDraw(state->vkCommandBuffer, 3, 1, 0, 0);
 	vkCmdEndRenderPass(state->vkCommandBuffer);
 #endif
+
 	VkImageMemoryBarrier barrier = {0};
 	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -163,7 +166,6 @@ static void R_impl_draw(struct R_State *state_)
 
 int R_impl_update_VK(struct R_State* state_)
 {
-	//struct R_StateVK *stateVK = (struct R_StateVK *)state;
 	MSG msg;
 
 	while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
@@ -197,7 +199,7 @@ static void R_impl_create_instance(struct R_StateVK *state, struct R_RendererDes
 	appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
 	appInfo.pEngineName = "No Engine";
 	appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-	appInfo.apiVersion = VK_API_VERSION_1_0;
+	appInfo.apiVersion = VK_API_VERSION_1_3;
 
 	const char *extensionNames[] = {
 		VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
@@ -229,6 +231,9 @@ static void R_impl_create_instance(struct R_StateVK *state, struct R_RendererDes
 
 	VkResult result = vkCreateInstance(&instanceCreateInfo, NULL, &state->vkInstance);
 	assert(result == VK_SUCCESS);
+	state->vkCreateRayTracingPipelinesKHR_ = (PFN_vkCreateRayTracingPipelinesKHR)
+		vkGetInstanceProcAddr(state->vkInstance, "vkCreateRayTracingPipelinesKHR");
+	assert(state->vkCreateRayTracingPipelinesKHR_);
 }
 
 
@@ -267,15 +272,22 @@ static void R_impl_create_device(struct R_StateVK *state, struct R_RendererDesc 
 	float queuePriority = 1.0f;
 	queueCreateInfo.pQueuePriorities = &queuePriority;
 
-	VkPhysicalDeviceFeatures deviceFeatures;
-	memset(&deviceFeatures, 0, sizeof(VkPhysicalDeviceFeatures));
+	VkPhysicalDeviceRayTracingPipelineFeaturesKHR raytracingFeatures = {0};
+	raytracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+	raytracingFeatures.rayTracingPipeline = VK_TRUE;
+
+	VkPhysicalDeviceFeatures deviceFeatures = {0};
 
 	const char *extensionNames[] = {
-		VK_KHR_SWAPCHAIN_EXTENSION_NAME
+		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+		VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+		VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+		VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME
 	};
 
 	VkDeviceCreateInfo deviceCreateInfo = {0};
 	deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+	deviceCreateInfo.pNext = &raytracingFeatures;
 	deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
 	deviceCreateInfo.queueCreateInfoCount = 1;
 	deviceCreateInfo.pEnabledFeatures = &deviceFeatures;
@@ -302,7 +314,7 @@ static void R_impl_create_device(struct R_StateVK *state, struct R_RendererDesc 
 	_freea(queueFamilies);
 }
 
-
+#if 0
 static void R_impl_create_pipeline(struct R_StateVK *state, struct R_RendererDesc *desc)
 {
 #include "vert.h"
@@ -449,7 +461,7 @@ static void R_impl_create_pipeline(struct R_StateVK *state, struct R_RendererDes
 	vkDestroyShaderModule(state->vkDevice, shaderModuleFS, NULL);
     vkDestroyShaderModule(state->vkDevice, shaderModuleVS, NULL);
 }
-
+#endif
 
 static void R_impl_create_swapchain(struct R_StateVK *state, struct R_RendererDesc *desc)
 {
@@ -637,13 +649,115 @@ static void R_impl_create_raytrace_image(struct R_StateVK *state, const struct R
 	vkBindImageMemory(state->vkDevice, state->vkRaytraceImage, memory, 0);
 }
 
+
+static void R_impl_create_raytrace_pipeline(struct R_StateVK *state, const struct R_RendererDesc *desc)
+{
+	VkDescriptorSetLayoutBinding accelerationStructureLayoutBinding = {0};
+	accelerationStructureLayoutBinding.binding = 0;
+	accelerationStructureLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+	accelerationStructureLayoutBinding.descriptorCount = 1;
+	accelerationStructureLayoutBinding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+
+	VkDescriptorSetLayoutBinding resultImageLayoutBinding = {0};
+	resultImageLayoutBinding.binding = 1;
+	resultImageLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	resultImageLayoutBinding.descriptorCount = 1;
+	resultImageLayoutBinding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+
+	VkDescriptorSetLayoutBinding uniformBufferBinding = {0};
+	uniformBufferBinding.binding = 2;
+	uniformBufferBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	uniformBufferBinding.descriptorCount = 1;
+	uniformBufferBinding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+
+	const VkDescriptorSetLayoutBinding bindings[] = {
+		resultImageLayoutBinding
+	};
+
+	VkDescriptorSetLayoutCreateInfo descriptorSetlayoutCI = {0};
+	descriptorSetlayoutCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	descriptorSetlayoutCI.bindingCount = ARRAYSIZE(bindings);
+	descriptorSetlayoutCI.pBindings = bindings;
+	VkDescriptorSetLayout descriptorSetLayout;
+	vkCreateDescriptorSetLayout(state->vkDevice, &descriptorSetlayoutCI, NULL, &descriptorSetLayout);
+	
+	VkPipelineLayoutCreateInfo pipelineLayoutCI = {0};
+	pipelineLayoutCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	pipelineLayoutCI.setLayoutCount = 1;
+	pipelineLayoutCI.pSetLayouts = &descriptorSetLayout;
+	VkPipelineLayout pipelineLayout;
+	vkCreatePipelineLayout(state->vkDevice, &pipelineLayoutCI, NULL, &pipelineLayout);
+
+	VkPipelineShaderStageCreateInfo shaderStages[2] = {0};
+	VkRayTracingShaderGroupCreateInfoKHR shaderGroups[2] = {0};
+
+	{
+#include "raygen.h"
+
+		VkShaderModuleCreateInfo createInfoVS = {0};
+		createInfoVS.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		createInfoVS.codeSize = raygen_spv_len;
+		createInfoVS.pCode = (const uint32_t *)raygen_spv;
+		VkShaderModule shaderModuleVS;
+		vkCreateShaderModule(state->vkDevice, &createInfoVS, NULL, &shaderModuleVS);
+
+		VkPipelineShaderStageCreateInfo shaderStage = {0};
+		shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		shaderStages[0].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+		shaderStages[0].module = shaderModuleVS;
+		shaderStages[0].pName = "main";
+
+		shaderGroups[0].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+		shaderGroups[0].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+		shaderGroups[0].generalShader = 0;
+		shaderGroups[0].closestHitShader = VK_SHADER_UNUSED_KHR;
+		shaderGroups[0].anyHitShader = VK_SHADER_UNUSED_KHR;
+		shaderGroups[0].intersectionShader = VK_SHADER_UNUSED_KHR;
+	}
+	{
+#include "miss.h"
+
+		VkShaderModuleCreateInfo createInfoVS = {0};
+		createInfoVS.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		createInfoVS.codeSize = miss_spv_len;
+		createInfoVS.pCode = (const uint32_t *)miss_spv;
+		VkShaderModule shaderModuleVS;
+		vkCreateShaderModule(state->vkDevice, &createInfoVS, NULL, &shaderModuleVS);
+
+		VkPipelineShaderStageCreateInfo shaderStage = {0};
+		shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		shaderStages[1].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
+		shaderStages[1].module = shaderModuleVS;
+		shaderStages[1].pName = "main";
+		
+		shaderGroups[1].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+		shaderGroups[1].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+		shaderGroups[1].generalShader = 1;
+		shaderGroups[1].closestHitShader = VK_SHADER_UNUSED_KHR;
+		shaderGroups[1].anyHitShader = VK_SHADER_UNUSED_KHR;
+		shaderGroups[1].intersectionShader = VK_SHADER_UNUSED_KHR;
+	}
+
+	VkRayTracingPipelineCreateInfoKHR rayTracingPipelineCI = {0};
+	rayTracingPipelineCI.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
+	rayTracingPipelineCI.stageCount = ARRAYSIZE(shaderStages);
+	rayTracingPipelineCI.pStages = shaderStages;
+	rayTracingPipelineCI.groupCount = ARRAYSIZE(shaderGroups);
+	rayTracingPipelineCI.pGroups = shaderGroups;
+	rayTracingPipelineCI.maxPipelineRayRecursionDepth = 1;
+	rayTracingPipelineCI.layout = pipelineLayout;
+	state->vkCreateRayTracingPipelinesKHR_(state->vkDevice, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &rayTracingPipelineCI, NULL, &state->vkPipeline);
+}
+
+
 static int R_impl_on_create(struct R_StateVK *state, const struct R_RendererDesc *desc)
 {
 	R_impl_create_instance(state, desc);
 	R_impl_create_device(state, desc);
 	R_impl_create_swapchain(state, desc);
-	R_impl_create_pipeline(state, desc);
+	//R_impl_create_pipeline(state, desc);
 	R_impl_create_raytrace_image(state, desc);
+	R_impl_create_raytrace_pipeline(state, desc);
 	return EXIT_SUCCESS;
 }
 
