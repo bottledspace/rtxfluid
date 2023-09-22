@@ -47,6 +47,9 @@ struct R_StateVK {
 	PFN_vkCmdTraceRaysKHR vkCmdTraceRaysKHR_;
 	PFN_vkGetRayTracingShaderGroupHandlesKHR vkGetRayTracingShaderGroupHandlesKHR_;
 	PFN_vkGetBufferDeviceAddressKHR vkGetBufferDeviceAddressKHR_;
+	PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHR_;
+	PFN_vkCmdBuildAccelerationStructuresKHR vkCmdBuildAccelerationStructuresKHR_;
+	PFN_vkGetAccelerationStructureBuildSizesKHR vkGetAccelerationStructureBuildSizesKHR_;
 };
 
 
@@ -230,7 +233,12 @@ static void R_impl_create_instance(struct R_StateVK *state, struct R_RendererDes
 		vkGetInstanceProcAddr(state->vkInstance, "vkGetRayTracingShaderGroupHandlesKHR");
 	state->vkGetBufferDeviceAddressKHR_ = (PFN_vkGetBufferDeviceAddressKHR)
 		vkGetInstanceProcAddr(state->vkInstance, "vkGetBufferDeviceAddressKHR");
-	assert(state->vkCreateRayTracingPipelinesKHR_);
+	state->vkCreateAccelerationStructureKHR_ = (PFN_vkCreateAccelerationStructureKHR)
+		vkGetInstanceProcAddr(state->vkInstance, "vkCreateAccelerationStructureKHR");
+	state->vkCmdBuildAccelerationStructuresKHR_ = (PFN_vkCmdBuildAccelerationStructuresKHR)
+		vkGetInstanceProcAddr(state->vkInstance, "vkCmdBuildAccelerationStructuresKHR");
+	state->vkGetAccelerationStructureBuildSizesKHR_ = (PFN_vkGetAccelerationStructureBuildSizesKHR)
+		vkGetInstanceProcAddr(state->vkInstance, "vkGetAccelerationStructureBuildSizesKHR");
 }
 
 
@@ -269,9 +277,15 @@ static void R_impl_create_device(struct R_StateVK *state, struct R_RendererDesc 
 	float queuePriority = 1.0f;
 	queueCreateInfo.pQueuePriorities = &queuePriority;
 	
+	VkPhysicalDeviceAccelerationStructureFeaturesKHR accelFeatures = {0};
+	accelFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+	accelFeatures.accelerationStructure = VK_TRUE;
+	//accelFeatures.accelerationStructureHostCommands = VK_TRUE;
+
 	VkPhysicalDeviceRayTracingPipelineFeaturesKHR raytracingFeatures = {0};
 	raytracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
 	raytracingFeatures.rayTracingPipeline = VK_TRUE;
+	raytracingFeatures.pNext = &accelFeatures;
 	
 	VkPhysicalDeviceBufferDeviceAddressFeaturesKHR bufferFeatures = {0};
 	bufferFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR;
@@ -463,6 +477,187 @@ static void R_impl_create_swapchain(struct R_StateVK *state, struct R_RendererDe
 }
 
 
+static void R_impl_create_accel_struct(struct R_StateVK *state, const struct R_RendererDesc *desc)
+{
+	VkBuffer aabbBuffer;
+	{
+		VkBufferCreateInfo bufferCreateInfo = {0};
+		bufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		bufferCreateInfo.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+		bufferCreateInfo.size = sizeof(VkAabbPositionsKHR);
+		vkCreateBuffer(state->vkDevice, &bufferCreateInfo, NULL, &aabbBuffer);
+		VkMemoryRequirements memoryRequirements = {0};
+		vkGetBufferMemoryRequirements(state->vkDevice, aabbBuffer, &memoryRequirements);
+		VkPhysicalDeviceMemoryProperties memProperties;
+		vkGetPhysicalDeviceMemoryProperties(state->vkPhysicalDevice, &memProperties);
+		uint32_t i;
+		for (i = 0; i < memProperties.memoryTypeCount; i++) {
+			if ((1 << i) & memoryRequirements.memoryTypeBits
+				&& memProperties.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+				break;
+			}
+		}
+		assert(i < memProperties.memoryTypeCount);
+		VkMemoryAllocateFlagsInfo memoryAllocateFlagsInfo = {0};
+		memoryAllocateFlagsInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+		memoryAllocateFlagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR;
+		VkMemoryAllocateInfo memoryAllocateInfo = {0};
+		memoryAllocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		memoryAllocateInfo.pNext = &memoryAllocateFlagsInfo;
+		memoryAllocateInfo.allocationSize = memoryRequirements.size;
+		memoryAllocateInfo.memoryTypeIndex = i;
+		VkDeviceMemory memory;
+		vkAllocateMemory(state->vkDevice, &memoryAllocateInfo, NULL, &memory);
+		vkBindBufferMemory(state->vkDevice, aabbBuffer, memory, 0);
+	}
+	VkBufferDeviceAddressInfoKHR bufferAddressInfo = {0};
+	bufferAddressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO_KHR;
+	bufferAddressInfo.buffer = aabbBuffer;
+
+	VkAccelerationStructureGeometryKHR accelerationStructureGeometry = {0};
+	accelerationStructureGeometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+	accelerationStructureGeometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+	accelerationStructureGeometry.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+	accelerationStructureGeometry.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+	accelerationStructureGeometry.geometry.aabbs.data.deviceAddress = state->vkGetBufferDeviceAddressKHR_(state->vkDevice, &bufferAddressInfo);
+
+	VkAccelerationStructureBuildGeometryInfoKHR accelerationStructureBuildGeometryInfo = {0};
+	accelerationStructureBuildGeometryInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+	accelerationStructureBuildGeometryInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	accelerationStructureBuildGeometryInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+	accelerationStructureBuildGeometryInfo.geometryCount = 1;
+	accelerationStructureBuildGeometryInfo.pGeometries = &accelerationStructureGeometry;
+	
+	const uint32_t numPrims = 1;
+	VkAccelerationStructureBuildSizesInfoKHR accelerationStructureBuildSizesInfo = {0};
+	accelerationStructureBuildSizesInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+	state->vkGetAccelerationStructureBuildSizesKHR_(state->vkDevice, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+		&accelerationStructureBuildGeometryInfo, &numPrims, &accelerationStructureBuildSizesInfo);
+
+
+	VkBuffer accelBuffer;
+	{
+		VkBufferCreateInfo bufferCreateInfo2 = {0};
+		bufferCreateInfo2.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferCreateInfo2.size = accelerationStructureBuildSizesInfo.accelerationStructureSize;
+		bufferCreateInfo2.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+		vkCreateBuffer(state->vkDevice, &bufferCreateInfo2, NULL, &accelBuffer);
+		VkMemoryRequirements memoryRequirements = {0};
+		vkGetBufferMemoryRequirements(state->vkDevice, accelBuffer, &memoryRequirements);
+		VkPhysicalDeviceMemoryProperties memProperties;
+		vkGetPhysicalDeviceMemoryProperties(state->vkPhysicalDevice, &memProperties);
+		uint32_t i;
+		for (i = 0; i < memProperties.memoryTypeCount; i++) {
+			if ((1 << i) & memoryRequirements.memoryTypeBits
+				&& memProperties.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+				break;
+			}
+		}
+		assert(i < memProperties.memoryTypeCount);
+		VkMemoryAllocateFlagsInfo memoryAllocateFlagsInfo = {0};
+		memoryAllocateFlagsInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+		memoryAllocateFlagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR;
+		VkMemoryAllocateInfo memoryAllocateInfo = {0};
+		memoryAllocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		memoryAllocateInfo.pNext = &memoryAllocateFlagsInfo;
+		memoryAllocateInfo.allocationSize = memoryRequirements.size;
+		memoryAllocateInfo.memoryTypeIndex = i;
+		VkDeviceMemory memory;
+		vkAllocateMemory(state->vkDevice, &memoryAllocateInfo, NULL, &memory);
+		vkBindBufferMemory(state->vkDevice, accelBuffer, memory, 0);
+	}
+
+	VkAccelerationStructureCreateInfoKHR accelerationStructureCreateInfo = {0};
+	accelerationStructureCreateInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+	accelerationStructureCreateInfo.buffer = accelBuffer;
+	accelerationStructureCreateInfo.size = accelerationStructureBuildSizesInfo.accelerationStructureSize;
+	accelerationStructureCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+
+	VkAccelerationStructureKHR blas;
+	state->vkCreateAccelerationStructureKHR_(state->vkDevice, &accelerationStructureCreateInfo, NULL, &blas);
+	
+	VkBuffer scratchBuffer;
+	{
+		VkBufferCreateInfo bufferCreateInfo3 = {0};
+		bufferCreateInfo3.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferCreateInfo3.size = accelerationStructureBuildSizesInfo.buildScratchSize;
+		bufferCreateInfo3.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		vkCreateBuffer(state->vkDevice, &bufferCreateInfo3, NULL, &scratchBuffer);
+		VkMemoryRequirements memoryRequirements2 = {0};
+		vkGetBufferMemoryRequirements(state->vkDevice, scratchBuffer, &memoryRequirements2);
+		VkMemoryAllocateFlagsInfo memoryAllocateFlagsInfo2 = {0};
+		memoryAllocateFlagsInfo2.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+		memoryAllocateFlagsInfo2.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR;
+		VkMemoryRequirements memoryRequirements = {0};
+		vkGetBufferMemoryRequirements(state->vkDevice, scratchBuffer, &memoryRequirements);
+		VkPhysicalDeviceMemoryProperties memProperties;
+		vkGetPhysicalDeviceMemoryProperties(state->vkPhysicalDevice, &memProperties);
+		uint32_t i;
+		for (i = 0; i < memProperties.memoryTypeCount; i++) {
+			if ((1 << i) & memoryRequirements.memoryTypeBits
+				&& memProperties.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+				break;
+			}
+		}
+		assert(i < memProperties.memoryTypeCount);
+		VkMemoryAllocateInfo memoryAllocateInfo2 = {0};
+		memoryAllocateInfo2.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		memoryAllocateInfo2.pNext = &memoryAllocateFlagsInfo2;
+		memoryAllocateInfo2.allocationSize = memoryRequirements2.size;
+		memoryAllocateInfo2.memoryTypeIndex = i;
+		VkDeviceMemory memory2;
+		vkAllocateMemory(state->vkDevice, &memoryAllocateInfo2, NULL, &memory2);
+		vkBindBufferMemory(state->vkDevice, scratchBuffer, memory2, 0);
+	}
+	VkBufferDeviceAddressInfoKHR bufferDeviceAddressInfo = {0};
+	bufferDeviceAddressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+	bufferDeviceAddressInfo.buffer = scratchBuffer;
+	VkDeviceAddress scratchBufferAddress = state->vkGetBufferDeviceAddressKHR_(state->vkDevice, &bufferDeviceAddressInfo);
+
+	VkAccelerationStructureBuildGeometryInfoKHR accelerationBuildGeometryInfo = {0};
+	accelerationBuildGeometryInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+	accelerationBuildGeometryInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	accelerationBuildGeometryInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+	accelerationBuildGeometryInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+	accelerationBuildGeometryInfo.dstAccelerationStructure = blas;
+	accelerationBuildGeometryInfo.geometryCount = 1;
+	accelerationBuildGeometryInfo.pGeometries = &accelerationStructureGeometry;
+	accelerationBuildGeometryInfo.scratchData.deviceAddress = scratchBufferAddress;
+
+	VkAccelerationStructureBuildRangeInfoKHR accelerationStructureBuildRangeInfo = {0};
+	accelerationStructureBuildRangeInfo.primitiveCount = numPrims;
+	accelerationStructureBuildRangeInfo.primitiveOffset = 0;
+	accelerationStructureBuildRangeInfo.firstVertex = 0;
+	accelerationStructureBuildRangeInfo.transformOffset = 0;
+	VkAccelerationStructureBuildRangeInfoKHR *accelerationBuildStructureRangeInfos[] = {&accelerationStructureBuildRangeInfo};
+
+	VkCommandBufferBeginInfo beginInfo = {0};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	vkBeginCommandBuffer(state->vkCommandBuffer, &beginInfo);
+	state->vkCmdBuildAccelerationStructuresKHR_(state->vkCommandBuffer, 1,
+		&accelerationBuildGeometryInfo, accelerationBuildStructureRangeInfos);
+	vkEndCommandBuffer(state->vkCommandBuffer);
+
+	vkResetFences(state->vkDevice, 1, &state->vkFence);
+
+	VkSubmitInfo submitInfo = {0};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &state->vkCommandBuffer;
+	vkQueueSubmit(state->vkGraphicsQueue, 1, &submitInfo, state->vkFence);
+
+	vkWaitForFences(state->vkDevice, 1, &state->vkFence, VK_TRUE, UINT64_MAX);
+
+	VkAccelerationStructureDeviceAddressInfoKHR accelerationDeviceAddressInfo = {0};
+	accelerationDeviceAddressInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+	accelerationDeviceAddressInfo.accelerationStructure = blas;
+
+	//bottomLevelAS.deviceAddress = vkGetAccelerationStructureDeviceAddressKHR(state->vkDevice, &accelerationDeviceAddressInfo);
+	//deleteScratchBuffer(scratchBuffer);
+}
+
+
 static void R_impl_create_raytrace_image(struct R_StateVK *state, const struct R_RendererDesc *desc)
 {
 	VkImageCreateInfo imageInfo = {0};
@@ -485,21 +680,21 @@ static void R_impl_create_raytrace_image(struct R_StateVK *state, const struct R
 	VkMemoryRequirements memRequirements;
 	vkGetImageMemoryRequirements(state->vkDevice, state->vkRaytraceImage, &memRequirements);
 
-	VkMemoryAllocateInfo allocInfo = {0};
-	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocInfo.allocationSize = memRequirements.size;
-
 	VkPhysicalDeviceMemoryProperties memProperties;
 	vkGetPhysicalDeviceMemoryProperties(state->vkPhysicalDevice, &memProperties);
 	uint32_t i;
 	for (i = 0; i < memProperties.memoryTypeCount; i++) {
 		if ((1 << i) & memRequirements.memoryTypeBits
 			&& memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
-			allocInfo.memoryTypeIndex = i;
 			break;
 		}
 	}
 	assert(i < memProperties.memoryTypeCount);
+
+	VkMemoryAllocateInfo allocInfo = {0};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.allocationSize = memRequirements.size;
+	allocInfo.memoryTypeIndex = i;
 
 	VkDeviceMemory memory;
 	vkAllocateMemory(state->vkDevice, &allocInfo, NULL, &memory);
@@ -592,6 +787,29 @@ static void R_impl_create_raytrace_pipeline(struct R_StateVK *state, const struc
 		shaderGroups[1].anyHitShader = VK_SHADER_UNUSED_KHR;
 		shaderGroups[1].intersectionShader = VK_SHADER_UNUSED_KHR;
 	}
+	/*{
+#include "hit.h"
+
+		VkShaderModuleCreateInfo createInfoVS = {0};
+		createInfoVS.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		createInfoVS.codeSize = hit_spv_len;
+		createInfoVS.pCode = (const uint32_t *)hit_spv;
+		VkShaderModule shaderModuleVS;
+		vkCreateShaderModule(state->vkDevice, &createInfoVS, NULL, &shaderModuleVS);
+
+		VkPipelineShaderStageCreateInfo shaderStage = {0};
+		shaderStages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		shaderStages[2].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
+		shaderStages[2].module = shaderModuleVS;
+		shaderStages[2].pName = "main";
+		
+		shaderGroups[2].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+		shaderGroups[2].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
+		shaderGroups[2].generalShader = VK_SHADER_UNUSED_KHR;
+		shaderGroups[2].closestHitShader = 2;
+		shaderGroups[2].anyHitShader = VK_SHADER_UNUSED_KHR;
+		shaderGroups[2].intersectionShader = VK_SHADER_UNUSED_KHR;
+	}*/
 
 	VkRayTracingPipelineCreateInfoKHR rayTracingPipelineCI = {0};
 	rayTracingPipelineCI.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
@@ -671,6 +889,7 @@ static void R_impl_create_binding_table(struct R_StateVK* state, const struct R_
 	const uint32_t sbtSize = groupCount * handleSizeAligned;
 
 	uint8_t *shaderHandleStorage = _malloca(sbtSize);
+	assert(shaderHandleStorage);
 	state->vkGetRayTracingShaderGroupHandlesKHR_(state->vkDevice, state->vkPipeline, 0, groupCount, sbtSize, shaderHandleStorage);
 	
 	VkBufferCreateInfo bufferCreateInfo = {0};
@@ -720,7 +939,7 @@ static int R_impl_on_create(struct R_StateVK *state, const struct R_RendererDesc
 	R_impl_create_instance(state, desc);
 	R_impl_create_device(state, desc);
 	R_impl_create_swapchain(state, desc);
-	//R_impl_create_pipeline(state, desc);
+	R_impl_create_accel_struct(state, desc);
 	R_impl_create_raytrace_image(state, desc);
 	R_impl_create_raytrace_pipeline(state, desc);
 	R_impl_create_descriptors(state, desc);
