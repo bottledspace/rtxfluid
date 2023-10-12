@@ -1,0 +1,15 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(binding = 2, set = 0) buffer Particles {
+    vec3 center; float radius;
+} particle;
+
+void main() {
+    vec3 co = particle.center - gl_WorldRayOriginEXT;
+    co -= dot(co, gl_WorldRayDirectionEXT)*gl_WorldRayDirectionEXT;
+
+    if (dot(co, co) < particle.radius * particle.radius) {
+        reportIntersectionEXT(0.5, 0);
+    }
+}

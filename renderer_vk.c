@@ -12,6 +12,11 @@
 
 #define R_IMPL_ALIGNTO(value, align) ((align)*(((align)+(value)-1)/(align)))
 
+struct R_Particle {
+	float x, y, z;
+	float radius;
+};
+
 struct R_StateVK {
 	int type;
 	int (*on_update)(struct R_State *);
@@ -40,6 +45,7 @@ struct R_StateVK {
 	VkPipelineLayout vkPipelineLayout;
 	VkPipeline vkPipeline;
 	VkImage vkRaytraceImage;
+	VkBuffer vkParticleBuffer;
 	VkDescriptorSet vkDescriptorSet;
 	VkDescriptorPool vkDescriptorPool;
 	VkDescriptorSetLayout vkDescriptorSetLayout;
@@ -263,7 +269,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL R_impl_print_debug_message(
 }
 
 
-static void R_impl_create_instance(struct R_StateVK *state, struct R_RendererDesc *desc)
+static void R_impl_create_instance(struct R_StateVK *state, const struct R_RendererDesc *desc)
 {
 	{
 		const VkApplicationInfo appInfo = {
@@ -295,22 +301,31 @@ static void R_impl_create_instance(struct R_StateVK *state, struct R_RendererDes
 
 	state->vkCreateRayTracingPipelinesKHR_ = (PFN_vkCreateRayTracingPipelinesKHR)
 		vkGetInstanceProcAddr(state->vkInstance, "vkCreateRayTracingPipelinesKHR");
+	assert(state->vkCreateRayTracingPipelinesKHR_);
 	state->vkCmdTraceRaysKHR_ = (PFN_vkCmdTraceRaysKHR)
 		vkGetInstanceProcAddr(state->vkInstance, "vkCmdTraceRaysKHR");
+	assert(state->vkCmdTraceRaysKHR_);
 	state->vkGetRayTracingShaderGroupHandlesKHR_ = (PFN_vkGetRayTracingShaderGroupHandlesKHR)
 		vkGetInstanceProcAddr(state->vkInstance, "vkGetRayTracingShaderGroupHandlesKHR");
+	assert(state->vkGetRayTracingShaderGroupHandlesKHR_);
 	state->vkGetBufferDeviceAddressKHR_ = (PFN_vkGetBufferDeviceAddressKHR)
 		vkGetInstanceProcAddr(state->vkInstance, "vkGetBufferDeviceAddressKHR");
+	assert(state->vkGetBufferDeviceAddressKHR_);
 	state->vkCreateAccelerationStructureKHR_ = (PFN_vkCreateAccelerationStructureKHR)
 		vkGetInstanceProcAddr(state->vkInstance, "vkCreateAccelerationStructureKHR");
+	assert(state->vkCreateAccelerationStructureKHR_);
 	state->vkCmdBuildAccelerationStructuresKHR_ = (PFN_vkCmdBuildAccelerationStructuresKHR)
 		vkGetInstanceProcAddr(state->vkInstance, "vkCmdBuildAccelerationStructuresKHR");
+	assert(state->vkCmdBuildAccelerationStructuresKHR_);
 	state->vkGetAccelerationStructureBuildSizesKHR_ = (PFN_vkGetAccelerationStructureBuildSizesKHR)
 		vkGetInstanceProcAddr(state->vkInstance, "vkGetAccelerationStructureBuildSizesKHR");
+	assert(state->vkGetAccelerationStructureBuildSizesKHR_);
 	state->vkGetAccelerationStructureDeviceAddressKHR_ = (PFN_vkGetAccelerationStructureDeviceAddressKHR)
 		vkGetInstanceProcAddr(state->vkInstance, "vkGetAccelerationStructureDeviceAddressKHR");
+	assert(state->vkGetAccelerationStructureDeviceAddressKHR_);
     state->vkCreateDebugUtilsMessengerEXT_ = (PFN_vkCreateDebugUtilsMessengerEXT)
 		vkGetInstanceProcAddr(state->vkInstance, "vkCreateDebugUtilsMessengerEXT");
+	assert(state->vkCreateDebugUtilsMessengerEXT_);
 	
 	{
 		const VkDebugUtilsMessengerCreateInfoEXT createInfo = {
@@ -333,18 +348,27 @@ static void R_impl_create_instance(struct R_StateVK *state, struct R_RendererDes
 }
 
 
-static void R_impl_create_device(struct R_StateVK *state, struct R_RendererDesc *desc)
+static void R_impl_create_device(struct R_StateVK *state, const struct R_RendererDesc *desc)
 {
 	uint32_t deviceCount = 0;
 	vkEnumeratePhysicalDevices(state->vkInstance, &deviceCount, NULL);
 	
 	VkPhysicalDevice *physicalDevices = _malloca(sizeof(VkPhysicalDevice) * deviceCount);
+	assert(physicalDevices);
 	vkEnumeratePhysicalDevices(state->vkInstance, &deviceCount, physicalDevices);
-	state->vkPhysicalDevice = physicalDevices[0];
+	
+	// TODO: Search for correct physical device (one which supports RT)
+	for (uint32_t i = 0; i < deviceCount; i++) {
+		if (i == 0) {
+			state->vkPhysicalDevice = physicalDevices[i];
+		}
+	}
+	assert(state->vkPhysicalDevice);
 
 	uint32_t queueFamilyCount = 0;
 	vkGetPhysicalDeviceQueueFamilyProperties(state->vkPhysicalDevice, &queueFamilyCount, NULL);
 	VkQueueFamilyProperties *queueFamilies = _malloca(sizeof(VkQueueFamilyProperties) * queueFamilyCount);
+	assert(queueFamilies);
 	vkGetPhysicalDeviceQueueFamilyProperties(state->vkPhysicalDevice, &queueFamilyCount, queueFamilies);
 
 	uint32_t familyIndex;
@@ -370,16 +394,16 @@ static void R_impl_create_device(struct R_StateVK *state, struct R_RendererDesc 
 			.queueCount = 1,
 			.pQueuePriorities = (const float[]){ 1.0 },
 		}};
-		const VkPhysicalDeviceAccelerationStructureFeaturesKHR accelFeatures = {
+		VkPhysicalDeviceAccelerationStructureFeaturesKHR accelFeatures = {
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
 			.accelerationStructure = VK_TRUE
 		};
-		const VkPhysicalDeviceRayTracingPipelineFeaturesKHR pipelineFeatures = {
+		VkPhysicalDeviceRayTracingPipelineFeaturesKHR pipelineFeatures = {
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
 			.rayTracingPipeline = VK_TRUE,
 			.pNext = &accelFeatures
 		};
-		const VkPhysicalDeviceBufferDeviceAddressFeaturesKHR addrFeatures = {
+		VkPhysicalDeviceBufferDeviceAddressFeaturesKHR addrFeatures = {
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR,
 			.bufferDeviceAddress = VK_TRUE,
 			.pNext = &pipelineFeatures
@@ -391,7 +415,7 @@ static void R_impl_create_device(struct R_StateVK *state, struct R_RendererDesc 
 		const VkDeviceCreateInfo createInfo = {
 			.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 			.pNext = &deviceFeatures2,
-			.pQueueCreateInfos = &queueInfos,
+			.pQueueCreateInfos = queueInfos,
 			.queueCreateInfoCount = ARRAYSIZE(queueInfos),
 			.pEnabledFeatures = NULL,
 			.enabledExtensionCount = ARRAYSIZE(extensionNames),
@@ -423,7 +447,7 @@ static void R_impl_create_device(struct R_StateVK *state, struct R_RendererDesc 
 }
 
 
-static void R_impl_create_swapchain(struct R_StateVK *state, struct R_RendererDesc *desc)
+static void R_impl_create_swapchain(struct R_StateVK *state, const struct R_RendererDesc *desc)
 {
 	{
 		const VkWin32SurfaceCreateInfoKHR surfaceCreateInfo = {
@@ -437,11 +461,13 @@ static void R_impl_create_swapchain(struct R_StateVK *state, struct R_RendererDe
 	uint32_t formatCount = 0;
 	vkGetPhysicalDeviceSurfaceFormatsKHR(state->vkPhysicalDevice, state->vkSurface, &formatCount, NULL);
 	VkSurfaceFormatKHR *surfaceFormats = _malloca(sizeof(VkSurfaceFormatKHR) * formatCount);
+	assert(surfaceFormats);
 	vkGetPhysicalDeviceSurfaceFormatsKHR(state->vkPhysicalDevice, state->vkSurface, &formatCount, surfaceFormats);
 
 	uint32_t presentModeCount = 0;
 	vkGetPhysicalDeviceSurfacePresentModesKHR(state->vkPhysicalDevice, state->vkSurface, &presentModeCount, NULL);
 	VkPresentModeKHR *presentModes = _malloca(sizeof(VkPresentModeKHR) * presentModeCount);
+	assert(presentModes);
 	vkGetPhysicalDeviceSurfacePresentModesKHR(state->vkPhysicalDevice, state->vkSurface, &presentModeCount, presentModes);
 
 	uint32_t formatIndex;
@@ -573,7 +599,7 @@ static void R_impl_create_swapchain(struct R_StateVK *state, struct R_RendererDe
 }
 
 
-static void R_impl_create_buffer(struct R_StateVK *state, VkBuffer **buffer, VkDeviceSize size, const void *data,
+static void R_impl_create_buffer(struct R_StateVK *state, VkBuffer *buffer, VkDeviceSize size, const void *data,
 	                             VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags propFlags)
 {
 	const VkBufferCreateInfo createInfo = {
@@ -658,7 +684,7 @@ static void R_impl_create_blas(struct R_StateVK *state, const struct R_RendererD
 		.pGeometries = &accelerationStructureGeometry,
 	};
 	const uint32_t numPrims = 1;
-	const VkAccelerationStructureBuildSizesInfoKHR buildInfo = {
+	VkAccelerationStructureBuildSizesInfoKHR buildInfo = {
 		.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
 	};
 	state->vkGetAccelerationStructureBuildSizesKHR_(state->vkDevice, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
@@ -746,7 +772,7 @@ static void R_impl_create_tlas(struct R_StateVK* state, const struct R_RendererD
 		.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
 		.accelerationStructure = state->blas
 	};
-	const uint32_t blasAddr = state->vkGetAccelerationStructureDeviceAddressKHR_(state->vkDevice, &accelerationDeviceAddressInfo);
+	const VkDeviceAddress blasAddr = state->vkGetAccelerationStructureDeviceAddressKHR_(state->vkDevice, &accelerationDeviceAddressInfo);
 	const VkAccelerationStructureInstanceKHR instance = {
 		.transform = transformMatrix,
 		.instanceCustomIndex = 0,
@@ -848,7 +874,7 @@ static void R_impl_create_tlas(struct R_StateVK* state, const struct R_RendererD
 			.firstVertex = 0,
 			.transformOffset = 0
 		};
-		VkAccelerationStructureBuildRangeInfoKHR *accelerationBuildStructureRangeInfos[] = {
+		const VkAccelerationStructureBuildRangeInfoKHR *accelerationBuildStructureRangeInfos[] = {
 			&accelerationStructureBuildRangeInfo
 		};
 		state->vkCmdBuildAccelerationStructuresKHR_(state->vkCommandBuffer, 1,
@@ -959,17 +985,24 @@ static void R_impl_create_raytrace_pipeline(struct R_StateVK *state, const struc
 			.binding = 0,
 			.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
 			.descriptorCount = 1,
-			.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR
+			.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR
 		};
 		const VkDescriptorSetLayoutBinding resultImageLayoutBinding = {
 			.binding = 1,
 			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
 			.descriptorCount = 1,
-			.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR
+			.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR
+		};
+		const VkDescriptorSetLayoutBinding particlesLayoutBinding = {
+			.binding = 2,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+			.descriptorCount = 1,
+			.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR
 		};
 		const VkDescriptorSetLayoutBinding bindings[] = {
 			accelerationStructureLayoutBinding,
-			resultImageLayoutBinding
+			resultImageLayoutBinding,
+			particlesLayoutBinding
 		};
 		const VkDescriptorSetLayoutCreateInfo createInfo = {
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1107,6 +1140,7 @@ static void R_impl_create_descriptors(struct R_StateVK *state, const struct R_Re
 		const VkDescriptorPoolSize poolSizes[] = {
 			{ VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
 			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 }
 		};
 		const VkDescriptorPoolCreateInfo createInfo = {
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1164,9 +1198,23 @@ static void R_impl_create_descriptors(struct R_StateVK *state, const struct R_Re
 			.dstSet = state->vkDescriptorSet,
 			.dstBinding = 1
 		};
+		const VkDescriptorBufferInfo storageBufferDescriptor = {
+			.buffer = state->vkParticleBuffer,
+			.offset = 0,
+			.range = VK_WHOLE_SIZE
+		};
+		const VkWriteDescriptorSet particlesBufferWrite = {
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+			.descriptorCount = 1,
+			.pBufferInfo = &storageBufferDescriptor,
+			.dstSet = state->vkDescriptorSet,
+			.dstBinding = 2
+		};
 		const VkWriteDescriptorSet writeDescriptorSets[] = {
 			accelerationStructureWrite,
-			resultImageWrite
+			resultImageWrite,
+			particlesBufferWrite
 		};
 		vkUpdateDescriptorSets(state->vkDevice, ARRAYSIZE(writeDescriptorSets), writeDescriptorSets, 0, VK_NULL_HANDLE);
 	}
@@ -1179,7 +1227,7 @@ static void R_impl_create_binding_table(struct R_StateVK* state, const struct R_
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR
 	};
 	{
-		const VkPhysicalDeviceProperties2 deviceProperties2 = {
+		VkPhysicalDeviceProperties2 deviceProperties2 = {
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
 			.pNext = &rtProps,
 		};
@@ -1190,15 +1238,15 @@ static void R_impl_create_binding_table(struct R_StateVK* state, const struct R_
 	uint8_t *shaderHandleStorage = _malloca(3 * state->rtHandleSize);
 	state->vkGetRayTracingShaderGroupHandlesKHR_(state->vkDevice, state->vkPipeline, 0, 1, state->rtHandleSize, shaderHandleStorage);
 	R_impl_create_buffer(state, &state->vkRaygenBuffer, state->rtHandleSize, shaderHandleStorage,
-		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+		VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	state->vkGetRayTracingShaderGroupHandlesKHR_(state->vkDevice, state->vkPipeline, 1, 1, state->rtHandleSize, shaderHandleStorage);
 	R_impl_create_buffer(state, &state->vkClosestHitBuffer, state->rtHandleSize, shaderHandleStorage,
-		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+		VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	state->vkGetRayTracingShaderGroupHandlesKHR_(state->vkDevice, state->vkPipeline, 2, 1, state->rtHandleSize, shaderHandleStorage);
 	R_impl_create_buffer(state, &state->vkMissBuffer, state->rtHandleSize, shaderHandleStorage,
-		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+		VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	_freea(shaderHandleStorage);
 }
@@ -1209,6 +1257,12 @@ static int R_impl_on_create(struct R_StateVK *state, const struct R_RendererDesc
 	R_impl_create_instance(state, desc);
 	R_impl_create_device(state, desc);
 	R_impl_create_swapchain(state, desc);
+
+	struct R_Particle particle = {
+		0.0,0.0,2.0,0.25
+	};
+	R_impl_create_buffer(state, &state->vkParticleBuffer, sizeof(struct R_Particle), &particle,  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
 	R_impl_create_blas(state, desc);
 	R_impl_create_tlas(state, desc);
 	R_impl_create_raytrace_image(state, desc);
@@ -1216,6 +1270,36 @@ static int R_impl_on_create(struct R_StateVK *state, const struct R_RendererDesc
 	R_impl_create_descriptors(state, desc);
 	R_impl_create_binding_table(state, desc);
 	return EXIT_SUCCESS;
+}
+
+
+static void R_impl_on_destroy(struct R_StateVK *state)
+{
+	// Wait for pending commands before we destroy resources.
+	vkWaitForFences(state->vkDevice, 1, &state->vkFence, VK_TRUE, UINT64_MAX);
+	vkDestroyFence(state->vkDevice, state->vkFence, NULL);
+
+	vkDestroySemaphore(state->vkDevice, state->vkImageAvailableSemaphore, NULL);
+	vkDestroySemaphore(state->vkDevice, state->vkRenderFinishedSemaphore, NULL);
+	vkDestroyFence(state->vkDevice, state->vkFence, NULL);
+
+	vkDestroyBuffer(state->vkDevice, state->vkMissBuffer, NULL);
+	vkDestroyBuffer(state->vkDevice, state->vkClosestHitBuffer, NULL);
+	vkDestroyBuffer(state->vkDevice, state->vkRaygenBuffer, NULL);
+
+	vkDestroyRenderPass(state->vkDevice, state->vkRenderPass, NULL);
+	vkDestroyPipelineLayout(state->vkDevice, state->vkPipelineLayout, NULL);
+	vkDestroyPipeline(state->vkDevice, state->vkPipeline, NULL);
+	for (size_t i = 0; i < R_SWAPCHAIN_COUNT; i++) {
+		vkDestroyFramebuffer(state->vkDevice, state->vkSwapchainFramebuffers[i], NULL);
+		vkDestroyImageView(state->vkDevice, state->vkSwapchainViews[i], NULL);
+	}
+	vkDestroyImage(state->vkDevice, state->vkRaytraceImage, NULL);
+	vkDestroySwapchainKHR(state->vkDevice, state->vkSwapchain, NULL);
+	vkDestroyCommandPool(state->vkDevice, state->vkCommandPool, NULL);
+	vkDestroySurfaceKHR(state->vkInstance, state->vkSurface, NULL);
+	vkDestroyDevice(state->vkDevice, NULL);
+	vkDestroyInstance(state->vkInstance, NULL);
 }
 
 
@@ -1248,23 +1332,7 @@ static LRESULT CALLBACK R_impl_WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
 	}
 	case WM_DESTROY: {
 		struct R_StateVK *state = R_STATE(hWnd);
-		vkWaitForFences(state->vkDevice, 1, &state->vkFence, VK_TRUE, UINT64_MAX);
-		vkDestroyFence(state->vkDevice, state->vkFence, NULL);
-		vkDestroySemaphore(state->vkDevice, state->vkImageAvailableSemaphore, NULL);
-		vkDestroySemaphore(state->vkDevice, state->vkRenderFinishedSemaphore, NULL);
-		vkDestroyRenderPass(state->vkDevice, state->vkRenderPass, NULL);
-		vkDestroyPipelineLayout(state->vkDevice, state->vkPipelineLayout, NULL);
-		vkDestroyPipeline(state->vkDevice, state->vkPipeline, NULL);
-		for (size_t i = 0; i < R_SWAPCHAIN_COUNT; i++) {
-			vkDestroyFramebuffer(state->vkDevice, state->vkSwapchainFramebuffers[i], NULL);
-			vkDestroyImageView(state->vkDevice, state->vkSwapchainViews[i], NULL);
-		}
-		vkDestroyImage(state->vkDevice, state->vkRaytraceImage, NULL);
-		vkDestroySwapchainKHR(state->vkDevice, state->vkSwapchain, NULL);
-		vkDestroyCommandPool(state->vkDevice, state->vkCommandPool, NULL);
-		vkDestroySurfaceKHR(state->vkInstance, state->vkSurface, NULL);
-		vkDestroyDevice(state->vkDevice, NULL);
-		vkDestroyInstance(state->vkInstance, NULL);
+		R_impl_on_destroy(state);
 		free(state);
 		break;
 	}
