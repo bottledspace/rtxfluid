@@ -1,15 +1,57 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
 
+struct Particle {
+    vec3 center;
+    float radius;
+};
 layout(binding = 2, set = 0) buffer Particles {
-    vec3 center; float radius;
-} particle;
+    Particle particles[3];
+};
+layout(binding = 3, set = 0, rgba8) uniform image2D envmap;
 
-void main() {
-    vec3 co = particle.center - gl_WorldRayOriginEXT;
-    co -= dot(co, gl_WorldRayDirectionEXT)*gl_WorldRayDirectionEXT;
+hitAttributeEXT vec3 hitNormal;
 
-    if (dot(co, co) < particle.radius * particle.radius) {
-        reportIntersectionEXT(0.5, 0);
+// Hack for infinity (see section 4.7.1 of standard)
+const float INFINITY = 1. / 0.;
+const float EPSILON = 0.001;
+
+float opSmoothUnion( float d1, float d2, float k ) {
+    float h = clamp( 0.5 + 0.5*(d2-d1)/k, 0.0, 1.0 );
+    return mix( d2, d1, h ) - k*h*(1.0-h);
+}
+
+float sdSphere(vec3 p, float s) {
+  return length(p) - s;
+}
+
+float sdf(vec3 p) {
+    return opSmoothUnion(
+        sdSphere(p-particles[0].center, particles[0].radius),
+        opSmoothUnion(
+            sdSphere(p-particles[1].center, particles[1].radius),
+            sdSphere(p-particles[2].center, particles[2].radius), 0.1), 0.1);
+}
+
+vec3 grad_sdf(vec3 position)
+{
+    // Taken from https://jamie-wong.com/2016/07/15/ray-marching-signed-distance-functions/
+    return normalize(vec3(
+        sdf(vec3(position.x + EPSILON, position.y, position.z)) - sdf(vec3(position.x - EPSILON, position.y, position.z)),
+        sdf(vec3(position.x, position.y + EPSILON, position.z)) - sdf(vec3(position.x, position.y - EPSILON, position.z)),
+        sdf(vec3(position.x, position.y, position.z + EPSILON)) - sdf(vec3(position.x, position.y, position.z - EPSILON))
+    ));
+}
+
+void main()
+{
+    float t = 0.0;
+    for (int k = 0; k < 10; k++) {
+        float dt = sdf(gl_WorldRayOriginEXT+gl_WorldRayDirectionEXT*t);
+        t += dt;
+        if (dt < EPSILON) {
+            hitNormal = grad_sdf(gl_WorldRayOriginEXT+gl_WorldRayDirectionEXT*t);
+            reportIntersectionEXT(t, 0);
+        }
     }
 }

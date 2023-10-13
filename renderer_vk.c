@@ -44,6 +44,7 @@ struct R_StateVK {
 	VkRenderPass vkRenderPass;
 	VkPipelineLayout vkPipelineLayout;
 	VkPipeline vkPipeline;
+	VkBuffer vkEnvmap;
 	VkImage vkRaytraceImage;
 	VkBuffer vkParticleBuffer;
 	VkDescriptorSet vkDescriptorSet;
@@ -896,28 +897,30 @@ static void R_impl_create_tlas(struct R_StateVK* state, const struct R_RendererD
 }
 
 
-static void R_impl_create_raytrace_image(struct R_StateVK *state, const struct R_RendererDesc *desc)
+static void R_impl_create_image(struct R_StateVK *state, VkImage *image,
+								int width, int height, uint8_t *pixels,
+								const struct R_RendererDesc *desc)
 {
 	{
 		const VkImageCreateInfo imageInfo = {
 			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
 			.imageType = VK_IMAGE_TYPE_2D,
-			.extent.width = state->width,
-			.extent.height = state->height,
+			.extent.width = width,
+			.extent.height = height,
 			.extent.depth = 1,
 			.mipLevels = 1,
 			.arrayLayers = 1,
 			.format = VK_FORMAT_B8G8R8A8_UNORM,
 			.tiling = VK_IMAGE_TILING_OPTIMAL,
 			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-			.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+			.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
 			.samples = VK_SAMPLE_COUNT_1_BIT,
 			.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 		};
-		vkCreateImage(state->vkDevice, &imageInfo, NULL, &state->vkRaytraceImage);
+		vkCreateImage(state->vkDevice, &imageInfo, NULL, image);
 	}
 	VkMemoryRequirements memRequirements;
-	vkGetImageMemoryRequirements(state->vkDevice, state->vkRaytraceImage, &memRequirements);
+	vkGetImageMemoryRequirements(state->vkDevice, *image, &memRequirements);
 
 	VkPhysicalDeviceMemoryProperties memProperties;
 	vkGetPhysicalDeviceMemoryProperties(state->vkPhysicalDevice, &memProperties);
@@ -939,7 +942,7 @@ static void R_impl_create_raytrace_image(struct R_StateVK *state, const struct R
 		};
 		vkAllocateMemory(state->vkDevice, &allocInfo, NULL, &memory);
 	}
-	vkBindImageMemory(state->vkDevice, state->vkRaytraceImage, memory, 0);
+	vkBindImageMemory(state->vkDevice, *image, memory, 0);
 
 	{
 		const VkCommandBufferBeginInfo beginInfo = {
@@ -951,10 +954,49 @@ static void R_impl_create_raytrace_image(struct R_StateVK *state, const struct R
 		const VkImageMemoryBarrier barrier = {
 			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
 			.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.image = *image,
+			.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.subresourceRange.layerCount = 1,
+			.subresourceRange.levelCount = 1
+		};
+		vkCmdPipelineBarrier(state->vkCommandBuffer,
+			VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+			VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+			0, 0, NULL, 0, NULL, 1, &barrier);
+	}
+	if (pixels) {
+		VkBuffer transferBuffer;
+		R_impl_create_buffer(state, &transferBuffer, memRequirements.size, pixels, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+		const VkBufferImageCopy region = {
+			.bufferOffset = 0,
+			.bufferRowLength = 0,
+			.bufferImageHeight = 0,
+			.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.imageSubresource.mipLevel = 0,
+			.imageSubresource.baseArrayLayer = 0,
+			.imageSubresource.layerCount = 1,
+			.imageOffset.x = 0,
+			.imageOffset.y = 0,
+			.imageOffset.z = 0,
+			.imageExtent.width = width,
+			.imageExtent.height = height,
+			.imageExtent.depth = 1
+		};
+		vkCmdCopyBufferToImage(state->vkCommandBuffer, transferBuffer, *image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+	}
+	{
+		const VkImageMemoryBarrier barrier = {
+			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+			.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			.newLayout = VK_IMAGE_LAYOUT_GENERAL,
 			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.image = state->vkRaytraceImage,
+			.image = *image,
 			.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 			.subresourceRange.layerCount = 1,
 			.subresourceRange.levelCount = 1
@@ -999,10 +1041,17 @@ static void R_impl_create_raytrace_pipeline(struct R_StateVK *state, const struc
 			.descriptorCount = 1,
 			.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR
 		};
+		const VkDescriptorSetLayoutBinding envmapLayoutBinding = {
+			.binding = 3,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+			.descriptorCount = 1,
+			.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR
+		};
 		const VkDescriptorSetLayoutBinding bindings[] = {
 			accelerationStructureLayoutBinding,
 			resultImageLayoutBinding,
-			particlesLayoutBinding
+			particlesLayoutBinding,
+			envmapLayoutBinding
 		};
 		const VkDescriptorSetLayoutCreateInfo createInfo = {
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1140,7 +1189,8 @@ static void R_impl_create_descriptors(struct R_StateVK *state, const struct R_Re
 		const VkDescriptorPoolSize poolSizes[] = {
 			{ VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
 			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 },
-			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 }
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }
 		};
 		const VkDescriptorPoolCreateInfo createInfo = {
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1159,7 +1209,7 @@ static void R_impl_create_descriptors(struct R_StateVK *state, const struct R_Re
 		};
 		vkAllocateDescriptorSets(state->vkDevice, &allocInfo, &state->vkDescriptorSet);
 	}
-	VkImageView imageView;
+	VkImageView raytraceImageView;
 	{
 		const VkImageViewCreateInfo imageViewCreateInfo = {
 			.viewType = VK_IMAGE_VIEW_TYPE_2D,
@@ -1170,7 +1220,20 @@ static void R_impl_create_descriptors(struct R_StateVK *state, const struct R_Re
 			.image = state->vkRaytraceImage,
 			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
 		};
-		vkCreateImageView(state->vkDevice, &imageViewCreateInfo, NULL, &imageView);
+		vkCreateImageView(state->vkDevice, &imageViewCreateInfo, NULL, &raytraceImageView);
+	}
+	VkImageView envmapImageView;
+	{
+		const VkImageViewCreateInfo imageViewCreateInfo = {
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.format = VK_FORMAT_B8G8R8A8_UNORM,
+			.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.subresourceRange.levelCount = 1,
+			.subresourceRange.layerCount = 1,
+			.image = state->vkEnvmap,
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+		};
+		vkCreateImageView(state->vkDevice, &imageViewCreateInfo, NULL, &envmapImageView);
 	}
 	{
 		const VkWriteDescriptorSetAccelerationStructureKHR descriptorAccelerationStructureInfo = {
@@ -1186,19 +1249,19 @@ static void R_impl_create_descriptors(struct R_StateVK *state, const struct R_Re
 			.descriptorCount = 1,
 			.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
 		};
-		const VkDescriptorImageInfo storageImageDescriptor = {
-			.imageView = imageView,
+		const VkDescriptorImageInfo raytraceImageDescriptor = {
+			.imageView = raytraceImageView,
 			.imageLayout = VK_IMAGE_LAYOUT_GENERAL,
 		};
-		const VkWriteDescriptorSet resultImageWrite = {
+		const VkWriteDescriptorSet raytraceImageWrite = {
 			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
 			.descriptorCount = 1,
-			.pImageInfo = &storageImageDescriptor,
+			.pImageInfo = &raytraceImageDescriptor,
 			.dstSet = state->vkDescriptorSet,
 			.dstBinding = 1
 		};
-		const VkDescriptorBufferInfo storageBufferDescriptor = {
+		const VkDescriptorBufferInfo particleBufferDescriptor = {
 			.buffer = state->vkParticleBuffer,
 			.offset = 0,
 			.range = VK_WHOLE_SIZE
@@ -1207,14 +1270,27 @@ static void R_impl_create_descriptors(struct R_StateVK *state, const struct R_Re
 			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 			.descriptorCount = 1,
-			.pBufferInfo = &storageBufferDescriptor,
+			.pBufferInfo = &particleBufferDescriptor,
 			.dstSet = state->vkDescriptorSet,
 			.dstBinding = 2
 		};
+		const VkDescriptorImageInfo envmapImageDescriptor = {
+			.imageView = envmapImageView,
+			.imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+		};
+		const VkWriteDescriptorSet envmapBufferWrite = {
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+			.descriptorCount = 1,
+			.pImageInfo = &envmapImageDescriptor,
+			.dstSet = state->vkDescriptorSet,
+			.dstBinding = 3
+		};
 		const VkWriteDescriptorSet writeDescriptorSets[] = {
 			accelerationStructureWrite,
-			resultImageWrite,
-			particlesBufferWrite
+			raytraceImageWrite,
+			particlesBufferWrite,
+			envmapBufferWrite
 		};
 		vkUpdateDescriptorSets(state->vkDevice, ARRAYSIZE(writeDescriptorSets), writeDescriptorSets, 0, VK_NULL_HANDLE);
 	}
@@ -1258,14 +1334,27 @@ static int R_impl_on_create(struct R_StateVK *state, const struct R_RendererDesc
 	R_impl_create_device(state, desc);
 	R_impl_create_swapchain(state, desc);
 
-	struct R_Particle particle = {
-		0.0,0.0,2.0,0.25
-	};
-	R_impl_create_buffer(state, &state->vkParticleBuffer, sizeof(struct R_Particle), &particle,  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
+	{
+		uint8_t *pixels = malloc(128*128*4);
+		assert(pixels);
+		for (int i = 0; i < 128*128*4; i++)
+			pixels[i] = 255*(i%3);
+		R_impl_create_image(state, &state->vkEnvmap, 128, 128, pixels, desc);
+		free(pixels);
+	}
+	{
+		const struct R_Particle particles[3] = {
+			{ 0.0,0.0,2.0,0.25 },
+			{ 0.25,0.0,2.0,0.25 },
+			{ 0.0,0.25,2.0,0.25 }
+		};
+		R_impl_create_buffer(state, &state->vkParticleBuffer,
+			sizeof(struct R_Particle)*3, particles, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	}
 	R_impl_create_blas(state, desc);
 	R_impl_create_tlas(state, desc);
-	R_impl_create_raytrace_image(state, desc);
+	R_impl_create_image(state, &state->vkRaytraceImage, state->width, state->height, NULL, desc);
 	R_impl_create_raytrace_pipeline(state, desc);
 	R_impl_create_descriptors(state, desc);
 	R_impl_create_binding_table(state, desc);
