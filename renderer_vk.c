@@ -5,12 +5,144 @@
 #include <stdio.h>
 #include <assert.h>
 #include <malloc.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #define R_SWAPCHAIN_COUNT 2
 #define R_WNDCLASS "86875c01-feaa-45f3-a273-eaf6442fe84d"
 #define R_STATE(hWnd) ((struct R_StateVK*)GetWindowLongPtr(hWnd, GWLP_USERDATA))
 
 #define R_IMPL_ALIGNTO(value, align) ((align)*(((align)+(value)-1)/(align)))
+
+
+
+// Based off DirectX sample code.
+static void R_impl_projmat(float *mat, float fov, float aspect, float nearZ, float farZ)
+{
+    const float w = (float)1/tan(aspect*fov*0.5);
+    const float h = (float)1/tan(fov*0.5);
+    const float Q = farZ/(farZ - nearZ);
+
+	memset(mat, 0, sizeof(float)*16);
+	mat[0] = w;
+    mat[5] = h;
+    mat[10] = Q;
+    mat[14] = -Q*nearZ;
+    mat[11] = 1.0;
+}
+
+// Taken from MESA 
+static int R_impl_invmat(float *invOut, const float *m)
+{
+    double inv[16], det;
+    int i;
+
+    inv[0] = m[5]  * m[10] * m[15] - 
+             m[5]  * m[11] * m[14] - 
+             m[9]  * m[6]  * m[15] + 
+             m[9]  * m[7]  * m[14] +
+             m[13] * m[6]  * m[11] - 
+             m[13] * m[7]  * m[10];
+    inv[4] = -m[4]  * m[10] * m[15] + 
+              m[4]  * m[11] * m[14] + 
+              m[8]  * m[6]  * m[15] - 
+              m[8]  * m[7]  * m[14] - 
+              m[12] * m[6]  * m[11] + 
+              m[12] * m[7]  * m[10];
+    inv[8] = m[4]  * m[9] * m[15] - 
+             m[4]  * m[11] * m[13] - 
+             m[8]  * m[5] * m[15] + 
+             m[8]  * m[7] * m[13] + 
+             m[12] * m[5] * m[11] - 
+             m[12] * m[7] * m[9];
+    inv[12] = -m[4]  * m[9] * m[14] + 
+               m[4]  * m[10] * m[13] +
+               m[8]  * m[5] * m[14] - 
+               m[8]  * m[6] * m[13] - 
+               m[12] * m[5] * m[10] + 
+               m[12] * m[6] * m[9];
+    inv[1] = -m[1]  * m[10] * m[15] + 
+              m[1]  * m[11] * m[14] + 
+              m[9]  * m[2] * m[15] - 
+              m[9]  * m[3] * m[14] - 
+              m[13] * m[2] * m[11] + 
+              m[13] * m[3] * m[10];
+    inv[5] = m[0]  * m[10] * m[15] - 
+             m[0]  * m[11] * m[14] - 
+             m[8]  * m[2] * m[15] + 
+             m[8]  * m[3] * m[14] + 
+             m[12] * m[2] * m[11] - 
+             m[12] * m[3] * m[10];
+    inv[9] = -m[0]  * m[9] * m[15] + 
+              m[0]  * m[11] * m[13] + 
+              m[8]  * m[1] * m[15] - 
+              m[8]  * m[3] * m[13] - 
+              m[12] * m[1] * m[11] + 
+              m[12] * m[3] * m[9];
+    inv[13] = m[0]  * m[9] * m[14] - 
+              m[0]  * m[10] * m[13] - 
+              m[8]  * m[1] * m[14] + 
+              m[8]  * m[2] * m[13] + 
+              m[12] * m[1] * m[10] - 
+              m[12] * m[2] * m[9];
+    inv[2] = m[1]  * m[6] * m[15] - 
+             m[1]  * m[7] * m[14] - 
+             m[5]  * m[2] * m[15] + 
+             m[5]  * m[3] * m[14] + 
+             m[13] * m[2] * m[7] - 
+             m[13] * m[3] * m[6];
+    inv[6] = -m[0]  * m[6] * m[15] + 
+              m[0]  * m[7] * m[14] + 
+              m[4]  * m[2] * m[15] - 
+              m[4]  * m[3] * m[14] - 
+              m[12] * m[2] * m[7] + 
+              m[12] * m[3] * m[6];
+    inv[10] = m[0]  * m[5] * m[15] - 
+              m[0]  * m[7] * m[13] - 
+              m[4]  * m[1] * m[15] + 
+              m[4]  * m[3] * m[13] + 
+              m[12] * m[1] * m[7] - 
+              m[12] * m[3] * m[5];
+    inv[14] = -m[0]  * m[5] * m[14] + 
+               m[0]  * m[6] * m[13] + 
+               m[4]  * m[1] * m[14] - 
+               m[4]  * m[2] * m[13] - 
+               m[12] * m[1] * m[6] + 
+               m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + 
+              m[1] * m[7] * m[10] + 
+              m[5] * m[2] * m[11] - 
+              m[5] * m[3] * m[10] - 
+              m[9] * m[2] * m[7] + 
+              m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - 
+             m[0] * m[7] * m[10] - 
+             m[4] * m[2] * m[11] + 
+             m[4] * m[3] * m[10] + 
+             m[8] * m[2] * m[7] - 
+             m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + 
+               m[0] * m[7] * m[9] + 
+               m[4] * m[1] * m[11] - 
+               m[4] * m[3] * m[9] - 
+               m[8] * m[1] * m[7] + 
+               m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - 
+              m[0] * m[6] * m[9] - 
+              m[4] * m[1] * m[10] + 
+              m[4] * m[2] * m[9] + 
+              m[8] * m[1] * m[6] - 
+              m[8] * m[2] * m[5];
+    det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (det == 0) {
+        return 0;
+	}
+    det = 1.0 / det;
+    for (i = 0; i < 16; i++) {
+        invOut[i] = inv[i] * det;
+	}
+    return 1;
+}
 
 struct R_Particle {
 	float x, y, z;
@@ -44,7 +176,8 @@ struct R_StateVK {
 	VkRenderPass vkRenderPass;
 	VkPipelineLayout vkPipelineLayout;
 	VkPipeline vkPipeline;
-	VkBuffer vkEnvmap;
+	VkImage vkEnvmap;
+	VkBuffer vkCameraBuffer;
 	VkImage vkRaytraceImage;
 	VkBuffer vkParticleBuffer;
 	VkDescriptorSet vkDescriptorSet;
@@ -56,6 +189,7 @@ struct R_StateVK {
 	VkAccelerationStructureKHR blas;
 	VkAccelerationStructureKHR tlas;
 	uint32_t rtHandleSize;
+	struct R_Particle *particles;
 
 	PFN_vkCreateRayTracingPipelinesKHR vkCreateRayTracingPipelinesKHR_;
 	PFN_vkCmdTraceRaysKHR vkCmdTraceRaysKHR_;
@@ -72,6 +206,18 @@ static void R_impl_draw(struct R_StateVK *state)
 {
 	vkWaitForFences(state->vkDevice, 1, &state->vkFence, VK_TRUE, UINT64_MAX);
 	vkResetFences(state->vkDevice, 1, &state->vkFence);
+
+	static float t = 0.0f;
+	state->particles[0].x = 0.25*sin(t);
+	state->particles[1].x = 0.25*cos(t+3.14159/2);
+	state->particles[2].x = 0.25*sin(t-3.14159/2);
+	state->particles[0].y = 0.25*cos(t);
+	state->particles[1].y = 0.25*sin(t+3.14159/2);
+	state->particles[2].y = 0.25*cos(t-3.14159/2);
+	state->particles[0].z = 1+0.25*sin(t);
+	state->particles[1].z = 1.5+0.25*cos(t+3.14159/2);
+	state->particles[2].z = 1+0.25*cos(t-3.14159/2);
+	t += 0.01f;
 
 	uint32_t imageIndex;
     vkAcquireNextImageKHR(state->vkDevice, state->vkSwapchain, UINT64_MAX,
@@ -241,7 +387,7 @@ static void R_impl_draw(struct R_StateVK *state)
 }
 
 
-int R_impl_update_VK(struct R_State* state_)
+int R_impl_update_VK(struct R_State* state)
 {
 	MSG msg;
 
@@ -252,7 +398,7 @@ int R_impl_update_VK(struct R_State* state_)
 		}
 		DispatchMessage(&msg);
 	}
-	R_impl_draw((struct R_StateVK *)state_);
+	R_impl_draw((struct R_StateVK *)state);
 	Sleep(10);
 	return 1;
 }
@@ -600,8 +746,8 @@ static void R_impl_create_swapchain(struct R_StateVK *state, const struct R_Rend
 }
 
 
-static void R_impl_create_buffer(struct R_StateVK *state, VkBuffer *buffer, VkDeviceSize size, const void *data,
-	                             VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags propFlags)
+static void R_impl_create_buffer(struct R_StateVK *state, VkBuffer *buffer, VkDeviceMemory *memoryOut,
+								 VkDeviceSize size, VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags propFlags)
 {
 	const VkBufferCreateInfo createInfo = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -642,27 +788,32 @@ static void R_impl_create_buffer(struct R_StateVK *state, VkBuffer *buffer, VkDe
 		};
 		vkAllocateMemory(state->vkDevice, &allocInfo, NULL, &memory);
 	}
-	if (data) {
-		void *memoryPtr;
-		vkMapMemory(state->vkDevice, memory, 0, size, 0, &memoryPtr);
-		memcpy(memoryPtr, data, size);
-		vkUnmapMemory(state->vkDevice, memory);
-	}
 	vkBindBufferMemory(state->vkDevice, *buffer, memory, 0);
+	if (memoryOut) {
+		*memoryOut = memory;
+	}
 }
 
 
 static void R_impl_create_blas(struct R_StateVK *state, const struct R_RendererDesc *desc)
 {
 	VkAabbPositionsKHR aabb;
-	aabb.minX = aabb.minY = aabb.minZ = -0.5;
-	aabb.maxX = aabb.maxY = aabb.maxZ = 0.5;
-	aabb.minZ += 2; aabb.maxZ += 2;
+	aabb.minX = aabb.minY = aabb.minZ = -2;
+	aabb.maxX = aabb.maxY = aabb.maxZ = 2;
+	aabb.minZ += 1; aabb.maxZ += 1;
 
 	VkBuffer aabbBuffer;
-	R_impl_create_buffer(state, &aabbBuffer, sizeof(VkAabbPositionsKHR), &aabb,
-		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+	{
+		VkDeviceMemory memory;
+		R_impl_create_buffer(state, &aabbBuffer, &memory, sizeof(VkAabbPositionsKHR),
+			VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+		void *memoryPtr;
+		vkMapMemory(state->vkDevice, memory, 0, sizeof(VkAabbPositionsKHR), 0, &memoryPtr);
+		memcpy(memoryPtr, &aabb, sizeof(VkAabbPositionsKHR));
+		vkUnmapMemory(state->vkDevice, memory);
+	}
 
 	const VkBufferDeviceAddressInfoKHR bufferAddressInfo = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO_KHR,
@@ -692,7 +843,7 @@ static void R_impl_create_blas(struct R_StateVK *state, const struct R_RendererD
 		&accelerationStructureBuildGeometryInfo, &numPrims, &buildInfo);
 
 	VkBuffer accelBuffer;
-	R_impl_create_buffer(state, &accelBuffer, buildInfo.accelerationStructureSize, NULL,
+	R_impl_create_buffer(state, &accelBuffer, NULL, buildInfo.accelerationStructureSize,
 		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
@@ -705,7 +856,7 @@ static void R_impl_create_blas(struct R_StateVK *state, const struct R_RendererD
 	state->vkCreateAccelerationStructureKHR_(state->vkDevice, &accelerationStructureCreateInfo, NULL, &state->blas);
 	
 	VkBuffer scratchBuffer;
-	R_impl_create_buffer(state, &scratchBuffer, buildInfo.buildScratchSize, NULL,
+	R_impl_create_buffer(state, &scratchBuffer, NULL, buildInfo.buildScratchSize,
 		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	
@@ -782,11 +933,20 @@ static void R_impl_create_tlas(struct R_StateVK* state, const struct R_RendererD
 		.flags = 0,
 		.accelerationStructureReference = blasAddr,
 	};
-	VkBuffer instancesBuffer;
-	R_impl_create_buffer(state, &instancesBuffer, sizeof(instance), &instance,
-		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	
+	VkBuffer instancesBuffer;
+	{
+		VkDeviceMemory memory;
+		R_impl_create_buffer(state, &instancesBuffer, &memory, sizeof(instance),
+			VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+		void *memoryPtr;
+		vkMapMemory(state->vkDevice, memory, 0, sizeof(instance), 0, &memoryPtr);
+		memcpy(memoryPtr, &instance, sizeof(instance));
+		vkUnmapMemory(state->vkDevice, memory);
+	}
+
 	VkDeviceAddress instancesBufferAddress;
 	{
 		const VkBufferDeviceAddressInfoKHR addrInfo = {
@@ -826,12 +986,12 @@ static void R_impl_create_tlas(struct R_StateVK* state, const struct R_RendererD
 	}
 
 	VkBuffer accelBuffer;
-	R_impl_create_buffer(state, &accelBuffer, buildInfo.accelerationStructureSize, NULL,
+	R_impl_create_buffer(state, &accelBuffer, NULL, buildInfo.accelerationStructureSize,
 		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	
 	VkBuffer scratchBuffer;
-	R_impl_create_buffer(state, &scratchBuffer, buildInfo.buildScratchSize, NULL,
+	R_impl_create_buffer(state, &scratchBuffer, NULL, buildInfo.buildScratchSize,
 		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	
@@ -969,8 +1129,13 @@ static void R_impl_create_image(struct R_StateVK *state, VkImage *image,
 	}
 	if (pixels) {
 		VkBuffer transferBuffer;
-		R_impl_create_buffer(state, &transferBuffer, memRequirements.size, pixels, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VkDeviceMemory memory;
+		R_impl_create_buffer(state, &transferBuffer, &memory, memRequirements.size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		void *memoryPtr;
+		vkMapMemory(state->vkDevice, memory, 0, VK_WHOLE_SIZE, 0, &memoryPtr);
+		memcpy(memoryPtr, pixels, width*height*4);
+		vkUnmapMemory(state->vkDevice, memory);
 
 		const VkBufferImageCopy region = {
 			.bufferOffset = 0,
@@ -1027,7 +1192,7 @@ static void R_impl_create_raytrace_pipeline(struct R_StateVK *state, const struc
 			.binding = 0,
 			.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
 			.descriptorCount = 1,
-			.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR
+			.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
 		};
 		const VkDescriptorSetLayoutBinding resultImageLayoutBinding = {
 			.binding = 1,
@@ -1047,11 +1212,18 @@ static void R_impl_create_raytrace_pipeline(struct R_StateVK *state, const struc
 			.descriptorCount = 1,
 			.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR
 		};
+		const VkDescriptorSetLayoutBinding cameraLayoutBinding = {
+			.binding = 4,
+			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.descriptorCount = 1,
+			.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR
+		};
 		const VkDescriptorSetLayoutBinding bindings[] = {
 			accelerationStructureLayoutBinding,
 			resultImageLayoutBinding,
 			particlesLayoutBinding,
-			envmapLayoutBinding
+			envmapLayoutBinding,
+			cameraLayoutBinding
 		};
 		const VkDescriptorSetLayoutCreateInfo createInfo = {
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1190,7 +1362,8 @@ static void R_impl_create_descriptors(struct R_StateVK *state, const struct R_Re
 			{ VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
 			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 },
 			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
-			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }
+			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 },
+			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 },
 		};
 		const VkDescriptorPoolCreateInfo createInfo = {
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1286,11 +1459,25 @@ static void R_impl_create_descriptors(struct R_StateVK *state, const struct R_Re
 			.dstSet = state->vkDescriptorSet,
 			.dstBinding = 3
 		};
+		const VkDescriptorBufferInfo cameraBufferDescriptor = {
+			.buffer = state->vkCameraBuffer,
+			.offset = 0,
+			.range = VK_WHOLE_SIZE
+		};
+		const VkWriteDescriptorSet cameraBufferWrite = {
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.descriptorCount = 1,
+			.pBufferInfo = &cameraBufferDescriptor,
+			.dstSet = state->vkDescriptorSet,
+			.dstBinding = 4,
+		};
 		const VkWriteDescriptorSet writeDescriptorSets[] = {
 			accelerationStructureWrite,
 			raytraceImageWrite,
 			particlesBufferWrite,
-			envmapBufferWrite
+			envmapBufferWrite,
+			cameraBufferWrite
 		};
 		vkUpdateDescriptorSets(state->vkDevice, ARRAYSIZE(writeDescriptorSets), writeDescriptorSets, 0, VK_NULL_HANDLE);
 	}
@@ -1312,21 +1499,50 @@ static void R_impl_create_binding_table(struct R_StateVK* state, const struct R_
 	state->rtHandleSize = R_IMPL_ALIGNTO(rtProps.shaderGroupHandleSize, rtProps.shaderGroupHandleAlignment);
 
 	uint8_t *shaderHandleStorage = _malloca(3 * state->rtHandleSize);
-	state->vkGetRayTracingShaderGroupHandlesKHR_(state->vkDevice, state->vkPipeline, 0, 1, state->rtHandleSize, shaderHandleStorage);
-	R_impl_create_buffer(state, &state->vkRaygenBuffer, state->rtHandleSize, shaderHandleStorage,
-		VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-	state->vkGetRayTracingShaderGroupHandlesKHR_(state->vkDevice, state->vkPipeline, 1, 1, state->rtHandleSize, shaderHandleStorage);
-	R_impl_create_buffer(state, &state->vkClosestHitBuffer, state->rtHandleSize, shaderHandleStorage,
-		VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-	state->vkGetRayTracingShaderGroupHandlesKHR_(state->vkDevice, state->vkPipeline, 2, 1, state->rtHandleSize, shaderHandleStorage);
-	R_impl_create_buffer(state, &state->vkMissBuffer, state->rtHandleSize, shaderHandleStorage,
-		VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+	{
+		VkDeviceMemory memory;
+		R_impl_create_buffer(state, &state->vkRaygenBuffer, &memory, state->rtHandleSize,
+			VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+		
+		state->vkGetRayTracingShaderGroupHandlesKHR_(state->vkDevice, state->vkPipeline, 0, 1, state->rtHandleSize, shaderHandleStorage);
+
+		void *memoryPtr;
+		vkMapMemory(state->vkDevice, memory, 0, state->rtHandleSize, 0, &memoryPtr);
+		memcpy(memoryPtr, shaderHandleStorage, state->rtHandleSize);
+		vkUnmapMemory(state->vkDevice, memory);
+	}
+	{
+		
+		VkDeviceMemory memory;
+		R_impl_create_buffer(state, &state->vkClosestHitBuffer, &memory, state->rtHandleSize,
+			VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+		
+		state->vkGetRayTracingShaderGroupHandlesKHR_(state->vkDevice, state->vkPipeline, 1, 1, state->rtHandleSize, shaderHandleStorage);
+
+		void *memoryPtr;
+		vkMapMemory(state->vkDevice, memory, 0, state->rtHandleSize, 0, &memoryPtr);
+		memcpy(memoryPtr, shaderHandleStorage, state->rtHandleSize);
+		vkUnmapMemory(state->vkDevice, memory);
+	}
+	{
+		
+		VkDeviceMemory memory;
+		R_impl_create_buffer(state, &state->vkMissBuffer, &memory, state->rtHandleSize,
+			VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+		state->vkGetRayTracingShaderGroupHandlesKHR_(state->vkDevice, state->vkPipeline, 2, 1, state->rtHandleSize, shaderHandleStorage);
+		
+		void *memoryPtr;
+		vkMapMemory(state->vkDevice, memory, 0, state->rtHandleSize, 0, &memoryPtr);
+		memcpy(memoryPtr, shaderHandleStorage, state->rtHandleSize);
+		vkUnmapMemory(state->vkDevice, memory);
+	}
+	
 	_freea(shaderHandleStorage);
 }
-
 
 static int R_impl_on_create(struct R_StateVK *state, const struct R_RendererDesc *desc)
 {
@@ -1335,23 +1551,61 @@ static int R_impl_on_create(struct R_StateVK *state, const struct R_RendererDesc
 	R_impl_create_swapchain(state, desc);
 
 	{
-		uint8_t *pixels = malloc(128*128*4);
+		int width, height, channels;
+		uint8_t *pixels = stbi_load("grid.png", &width, &height, &channels, 4);
 		assert(pixels);
-		for (int i = 0; i < 128*128*4; i++)
-			pixels[i] = 255*(i%3);
-		R_impl_create_image(state, &state->vkEnvmap, 128, 128, pixels, desc);
-		free(pixels);
+		R_impl_create_image(state, &state->vkEnvmap, width, height, pixels, desc);
+		stbi_image_free(pixels);
 	}
 	{
-		const struct R_Particle particles[3] = {
-			{ 0.0,0.0,2.0,0.25 },
-			{ 0.25,0.0,2.0,0.25 },
-			{ 0.0,0.25,2.0,0.25 }
-		};
-		R_impl_create_buffer(state, &state->vkParticleBuffer,
-			sizeof(struct R_Particle)*3, particles, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+		struct R_Particle particles[3];
+		/*for (int i = 0; i < ARRAYSIZE(particles); i++) {
+			particles[i].x = (float)rand()/(float)RAND_MAX - 0.5;
+			particles[i].y = (float)rand()/(float)RAND_MAX - 0.5;
+			particles[i].z = (float)rand()/(float)RAND_MAX - 0.5 + 1;
+			particles[i].radius = 0.05;
+		}*/
+		
+		particles[0].x = 0;
+		particles[0].y = 0;
+		particles[0].z = 1.0;
+		particles[0].radius = 0.15;
+		particles[1].x = 0;
+		particles[1].y = 0;
+		particles[1].z = 1.0;
+		particles[1].radius = 0.15;
+		particles[2].x = 0;
+		particles[2].y = 0;
+		particles[2].z = 1.0;
+		particles[2].radius = 0.15;
+
+		VkDeviceMemory memory;
+		R_impl_create_buffer(state, &state->vkParticleBuffer, &memory,
+			sizeof(particles), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		
+		vkMapMemory(state->vkDevice, memory, 0, VK_WHOLE_SIZE, 0, &state->particles);
+		memcpy(state->particles, particles, sizeof(particles));
+		// We keep the particles mapped(!)
 	}
+	{
+		struct {
+			float mvp[16];
+		} camera;
+		R_impl_projmat(camera.mvp, 0.9075704f, 1.333f, 0.1, 100.0);
+		R_impl_invmat(camera.mvp, camera.mvp);
+
+		VkDeviceMemory memory;
+		R_impl_create_buffer(state, &state->vkCameraBuffer, &memory,
+			sizeof(camera), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		
+		void *ptr;
+		vkMapMemory(state->vkDevice, memory, 0, VK_WHOLE_SIZE, 0, &ptr);
+		memcpy(ptr, &camera, sizeof(camera));
+		vkUnmapMemory(state->vkDevice, memory);
+	}
+
 	R_impl_create_blas(state, desc);
 	R_impl_create_tlas(state, desc);
 	R_impl_create_image(state, &state->vkRaytraceImage, state->width, state->height, NULL, desc);

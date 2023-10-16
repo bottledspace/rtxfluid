@@ -6,52 +6,129 @@ struct Particle {
     float radius;
 };
 layout(binding = 2, set = 0) buffer Particles {
-    Particle particles[3];
+    Particle particles[];
 };
 layout(binding = 3, set = 0, rgba8) uniform image2D envmap;
 
-hitAttributeEXT vec3 hitNormal;
+hitAttributeEXT struct {
+    vec3 n;
+    vec3 i;
+    bool inside;
+} hit;
 
 // Hack for infinity (see section 4.7.1 of standard)
 const float INFINITY = 1. / 0.;
 const float EPSILON = 0.001;
 
+// Taken from https://iquilezles.org/articles/distfunctions/
 float opSmoothUnion( float d1, float d2, float k ) {
     float h = clamp( 0.5 + 0.5*(d2-d1)/k, 0.0, 1.0 );
     return mix( d2, d1, h ) - k*h*(1.0-h);
 }
-
 float sdSphere(vec3 p, float s) {
   return length(p) - s;
 }
 
 float sdf(vec3 p) {
-    return opSmoothUnion(
-        sdSphere(p-particles[0].center, particles[0].radius),
-        opSmoothUnion(
-            sdSphere(p-particles[1].center, particles[1].radius),
-            sdSphere(p-particles[2].center, particles[2].radius), 0.1), 0.1);
+    float dist = sdSphere(p-particles[0].center, particles[0].radius);
+    for (int i = 1; i < 3; i++) {
+        dist = opSmoothUnion(dist, sdSphere(p-particles[i].center, particles[i].radius), 0.2);
+    }
+    return dist;
 }
 
 vec3 grad_sdf(vec3 position)
 {
-    // Taken from https://jamie-wong.com/2016/07/15/ray-marching-signed-distance-functions/
+    float center = sdf(vec3(position.x, position.y, position.z));
+    float right = sdf(vec3(position.x + EPSILON, position.y, position.z));
+    float left = sdf(vec3(position.x - EPSILON, position.y, position.z));
+    float up = sdf(vec3(position.x, position.y + EPSILON, position.z));
+    float down = sdf(vec3(position.x, position.y - EPSILON, position.z));
+    float forward = sdf(vec3(position.x, position.y, position.z + EPSILON));
+    float backward = sdf(vec3(position.x, position.y, position.z - EPSILON));
     return normalize(vec3(
-        sdf(vec3(position.x + EPSILON, position.y, position.z)) - sdf(vec3(position.x - EPSILON, position.y, position.z)),
-        sdf(vec3(position.x, position.y + EPSILON, position.z)) - sdf(vec3(position.x, position.y - EPSILON, position.z)),
-        sdf(vec3(position.x, position.y, position.z + EPSILON)) - sdf(vec3(position.x, position.y, position.z - EPSILON))
+        (right > left)? (right - center) : (center - left),
+        (up > down)? (up - center) : (center - down),
+        (forward > backward)? (forward - center) : (center - backward)
     ));
+}
+
+bool intersect_sdf(out float t, vec3 origin, vec3 direction)
+{
+    float a = gl_RayTminEXT;
+    float b = gl_RayTminEXT;
+    float valA = sdf(origin+a*direction);
+    float valB = sdf(origin+b*direction);
+    
+    for (int k = 0; k < 100 && (valA>0) == (valB>0); ++k) {
+        b += 0.125;
+        valB = sdf(origin+b*direction);
+    }
+    if ((valA>0) == (valB>0))
+        return false;
+    for (int i = 0; i < 10; i++) {
+        float c = (a+b)/2;
+        float valC = sdf(origin+c*direction);
+
+        if ((valC>0) == (valA>0)) {
+            a = c;
+            valA = valC;
+        } else {
+            b = c;
+            valB = c;
+        }
+    }
+    t = a;
+    return true;
 }
 
 void main()
 {
-    float t = 0.0;
-    for (int k = 0; k < 10; k++) {
-        float dt = sdf(gl_WorldRayOriginEXT+gl_WorldRayDirectionEXT*t);
-        t += dt;
-        if (dt < EPSILON) {
-            hitNormal = grad_sdf(gl_WorldRayOriginEXT+gl_WorldRayDirectionEXT*t);
-            reportIntersectionEXT(t, 0);
+    vec3 orig = gl_WorldRayOriginEXT;
+    vec3 dir = gl_WorldRayDirectionEXT;
+    float t;
+    if (intersect_sdf(t, orig, dir)) {
+        hit.i = orig+dir*t;
+        hit.n = grad_sdf(hit.i);
+        hit.inside = sdf(orig)<0.0;
+        reportIntersectionEXT(t, 0);
+    }
+}
+
+void main2()
+{
+    float t = gl_RayTmaxEXT;
+    int k = -1;
+
+    for (int i = 0; i < 3; i++) {
+        vec3 oc = gl_WorldRayOriginEXT - particles[i].center;
+        float a = dot(gl_WorldRayDirectionEXT, gl_WorldRayDirectionEXT);
+        float b = 2*dot(oc, gl_WorldRayDirectionEXT);
+        float c = dot(oc, oc) - particles[i].radius*particles[i].radius;
+        float det = b*b - 4*a*c;
+        if (det < 0) {
+            continue;
         }
+        det = sqrt(det);
+        float t1 = (-b+det)/(2*a);
+        float t2 = (-b-det)/(2*a);
+        float ti = gl_RayTmaxEXT;
+        if (t1 > gl_RayTminEXT && t1 < ti) {
+            ti = t1;
+        }
+        if (t2 > gl_RayTminEXT && t2 < ti) {
+            ti = t2;
+        }
+        if (ti < t) {
+            t = ti;
+            k = i;
+        }
+    }
+    if (k > -1) {
+        hit.i = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT*t;
+        hit.n = normalize(hit.i - particles[k].center);
+
+        hit.inside = (dot(gl_WorldRayOriginEXT-particles[k].center, gl_WorldRayOriginEXT-particles[k].center) < particles[k].radius*particles[k].radius);
+        reportIntersectionEXT(t, 0);
     }
 }
